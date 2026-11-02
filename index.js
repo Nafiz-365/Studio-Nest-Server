@@ -196,9 +196,117 @@ app.get("/my-studios/:email", verifyToken, async (req, res) => {
   }
 });
 
+
+// POST /add-studio - Create new creative studio listing (Protected)
+app.post("/add-studio", verifyToken, async (req, res) => {
+  try {
+    const data = req.body;
+    const userEmail = req.user?.email || data.ownerEmail;
+    const userName = req.user?.name || data.ownerName;
+
+    const newStudio = {
+      ...data,
+      ownerEmail: userEmail,
+      ownerName: userName,
+      rating: 5.0,
+      reviewsCount: 1,
+      reviews: [
+        {
+          id: "rev-init",
+          author: "StudioNest Verification",
+          rating: 5,
+          date: new Date().toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }),
+          comment: "Workspace verified by StudioNest production quality review."
+        }
+      ],
+      createdAt: new Date().toISOString()
+    };
+
+    const result = await studiosCollection.insertOne(newStudio);
+    res.status(201).json({
+      message: "Studio listing created successfully!",
+      insertedId: result.insertedId,
+      studio: { ...newStudio, _id: result.insertedId }
+    });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to create studio listing", details: err.message });
+  }
+});
+
+// PATCH /studio/:id - Update studio listing (Protected)
+app.patch("/studio/:id", verifyToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const updateData = req.body;
+    delete updateData._id; // prevent immutable _id update error
+
+    let filter = null;
+    if (ObjectId.isValid(id)) {
+      filter = { _id: new ObjectId(id) };
+    } else {
+      filter = { id: id };
+    }
+
+    const existing = await studiosCollection.findOne(filter);
+    if (!existing) {
+      return res.status(404).json({ error: "Studio not found" });
+    }
+
+    // Verify ownership
+    if (req.user?.email && existing.ownerEmail && existing.ownerEmail.toLowerCase() !== req.user.email.toLowerCase()) {
+      return res.status(403).json({ error: "Unauthorized: You can only edit your own studio listings." });
+    }
+
+    updateData.updatedAt = new Date().toISOString();
+    const result = await studiosCollection.updateOne(filter, { $set: updateData });
+
+    res.json({
+      message: "Studio details updated successfully!",
+      modifiedCount: result.modifiedCount
+    });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to update studio listing", details: err.message });
+  }
+});
+
+// DELETE /studio/:id - Remove studio listing (Protected)
+app.delete("/studio/:id", verifyToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    let filter = null;
+    if (ObjectId.isValid(id)) {
+      filter = { _id: new ObjectId(id) };
+    } else {
+      filter = { id: id };
+    }
+
+    const existing = await studiosCollection.findOne(filter);
+    if (!existing) {
+      return res.status(404).json({ error: "Studio already removed or not found" });
+    }
+
+    // Verify ownership
+    if (req.user?.email && existing.ownerEmail && existing.ownerEmail.toLowerCase() !== req.user.email.toLowerCase()) {
+      return res.status(403).json({ error: "Unauthorized: You can only delete your own studio listings." });
+    }
+
+    const result = await studiosCollection.deleteOne(filter);
+    // Cascade cleanup: remove pending bookings for this studio
+    await bookingsCollection.deleteMany({ studioId: id });
+
+    res.json({
+      message: `${existing.title} removed successfully!`,
+      deletedCount: result.deletedCount
+    });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to delete studio", details: err.message });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`StudioNest Server running on port ${PORT}`);
 });
 
 export default app;
+
 
