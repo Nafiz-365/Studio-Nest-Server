@@ -303,10 +303,88 @@ app.delete("/studio/:id", verifyToken, async (req, res) => {
   }
 });
 
+
+// Helper: Calculate session hours
+function calculateHours(startTime, endTime) {
+  const [startH, startM] = startTime.split(":").map(Number);
+  const [endH, endM] = endTime.split(":").map(Number);
+  const diffInMinutes = endH * 60 + endM - (startH * 60 + startM);
+  return Math.max(1, Math.round(diffInMinutes / 60));
+}
+
+// POST /booking - Smart reservation with double-booking collision prevention
+app.post("/booking", async (req, res) => {
+  try {
+    const data = req.body;
+    const { studioId, date, startTime, endTime } = data;
+
+    if (!studioId || !date || !startTime || !endTime) {
+      return res.status(400).json({ error: "Missing required booking details (studioId, date, startTime, endTime)." });
+    }
+
+    // 1. Collision detection: Prevent double booking
+    const overlappingBookings = await bookingsCollection.find({
+      studioId: studioId,
+      date: date,
+      status: { $in: ["Confirmed", "Pending"] }
+    }).toArray();
+
+    const reqStart = new Date(`${date}T${startTime}:00`).getTime();
+    const reqEnd = new Date(`${date}T${endTime}:00`).getTime();
+
+    const collision = overlappingBookings.find((b) => {
+      const bStart = new Date(`${b.date}T${b.startTime}:00`).getTime();
+      const bEnd = new Date(`${b.date}T${b.endTime}:00`).getTime();
+      return reqStart < bEnd && reqEnd > bStart;
+    });
+
+    if (collision) {
+      return res.status(409).json({
+        error: "Double booking collision detected",
+        message: `This workspace is already reserved from ${collision.startTime} to ${collision.endTime} on ${date}. Please choose another time slot.`
+      });
+    }
+
+    // 2. Fetch studio to compute exact financial breakdown
+    let studioFilter = ObjectId.isValid(studioId) ? { _id: new ObjectId(studioId) } : { id: studioId };
+    const studio = await studiosCollection.findOne(studioFilter);
+
+    const rate = studio?.rate || data.rate || 100;
+    const deposit = studio?.deposit ?? (data.deposit ?? 150);
+    const hours = calculateHours(startTime, endTime);
+    const subtotal = hours * rate;
+    const serviceFee = Math.round(subtotal * 0.08); // 8% platform fee
+    const total = subtotal + serviceFee + deposit;
+
+    const newBooking = {
+      ...data,
+      hours,
+      rate,
+      subtotal,
+      serviceFee,
+      deposit,
+      total,
+      status: data.status || "Pending",
+      createdAt: new Date().toISOString()
+    };
+
+    const result = await bookingsCollection.insertOne(newBooking);
+
+    res.status(201).json({
+      message: "Studio reserved successfully! Confirmation generated.",
+      insertedId: result.insertedId,
+      booking: { ...newBooking, _id: result.insertedId }
+    });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to create booking reservation", details: err.message });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`StudioNest Server running on port ${PORT}`);
 });
 
 export default app;
+
 
 
