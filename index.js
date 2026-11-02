@@ -160,8 +160,45 @@ app.get("/featured-studios", async (req, res) => {
   }
 });
 
+
+// GET /studio/:id - Single studio details
+app.get("/studio/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    let studio = null;
+
+    if (ObjectId.isValid(id)) {
+      studio = await studiosCollection.findOne({ _id: new ObjectId(id) });
+    }
+    if (!studio) {
+      studio = await studiosCollection.findOne({ id: id });
+    }
+
+    if (!studio) {
+      return res.status(404).json({ error: "Studio not found" });
+    }
+    res.json(studio);
+  } catch (err) {
+    res.status(500).json({ error: "Failed to fetch studio details", details: err.message });
+  }
+});
+
+// GET /my-studios/:email - Studios listed by a specific host
+app.get("/my-studios/:email", verifyToken, async (req, res) => {
+  try {
+    const { email } = req.params;
+    const studios = await studiosCollection.find({
+      ownerEmail: email.toLowerCase()
+    }).sort({ createdAt: -1 }).toArray();
+    res.json(studios);
+  } catch (err) {
+    res.status(500).json({ error: "Failed to fetch host listings", details: err.message });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`StudioNest Server running on port ${PORT}`);
 });
 
 export default app;
+
