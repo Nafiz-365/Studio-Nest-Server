@@ -1,13 +1,26 @@
 {
   "name": "studio-nest-server",
   "version": "1.0.0",
-  "description": "",
+  "description": "StudioNest - Peer-to-Peer Creative Workspace & Production Studio Sharing Platform Server",
   "main": "index.js",
+  "type": "module",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node index.js",
+    "dev": "node --watch index.js"
   },
-  "keywords": [],
-  "author": "",
+  "keywords": [
+    "studionest",
+    "express",
+    "mongodb",
+    "marketplace"
+  ],
+  "author": "Nafiz Kamal Talha",
   "license": "ISC",
-  "type": "commonjs"
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "jose": "^6.0.8",
+    "mongodb": "^6.13.0"
+  }
 }
