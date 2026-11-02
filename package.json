@@ -6,7 +6,7 @@
   "type": "module",
   "scripts": {
     "start": "node index.js",
-    "dev": "node --watch index.js"
+    "dev": "nodemon index.js"
   },
   "keywords": [
     "studionest",
@@ -22,5 +22,8 @@
     "express": "^4.21.2",
     "jose": "^6.0.8",
     "mongodb": "^6.13.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.14"
   }
 }
