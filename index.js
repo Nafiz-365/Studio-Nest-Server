@@ -380,11 +380,119 @@ app.post("/booking", async (req, res) => {
   }
 });
 
+
+// GET /my-bookings/:email - User bookings retrieval (Protected)
+app.get("/my-bookings/:email", verifyToken, async (req, res) => {
+  try {
+    const { email } = req.params;
+    const bookings = await bookingsCollection
+      .find({ userEmail: email.toLowerCase() })
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    res.json(bookings);
+  } catch (err) {
+    res.status(500).json({ error: "Failed to fetch user bookings", details: err.message });
+  }
+});
+
+// PATCH /booking/:id/cancel - Cancel pending booking
+app.patch("/booking/:id/cancel", verifyToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    let filter = ObjectId.isValid(id) ? { _id: new ObjectId(id) } : { id: id };
+
+    const booking = await bookingsCollection.findOne(filter);
+    if (!booking) {
+      return res.status(404).json({ error: "Reservation not found" });
+    }
+
+    if (booking.status !== "Pending") {
+      return res.status(400).json({ error: "Only Pending reservations can be cancelled directly." });
+    }
+
+    const result = await bookingsCollection.updateOne(filter, {
+      $set: { status: "Cancelled", cancelledAt: new Date().toISOString() }
+    });
+
+    res.json({
+      message: "Reservation successfully cancelled.",
+      modifiedCount: result.modifiedCount
+    });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to cancel reservation", details: err.message });
+  }
+});
+
+// DELETE /my-bookings/:id - Remove booking entry
+app.delete("/my-bookings/:id", verifyToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    let filter = ObjectId.isValid(id) ? { _id: new ObjectId(id) } : { id: id };
+
+    const result = await bookingsCollection.deleteOne(filter);
+    if (result.deletedCount === 0) {
+      return res.status(404).json({ error: "Booking not found or already deleted" });
+    }
+
+    res.json({ message: "Booking removed successfully", deletedCount: result.deletedCount });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to delete booking", details: err.message });
+  }
+});
+
+// GET /wishlist/:email - Retrieve user saved studio IDs
+app.get("/wishlist/:email", async (req, res) => {
+  try {
+    const { email } = req.params;
+    const entry = await wishlistCollection.findOne({ email: email.toLowerCase() });
+    res.json({ wishlist: entry?.studioIds || [] });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to fetch wishlist", details: err.message });
+  }
+});
+
+// POST /wishlist - Toggle studio saved state
+app.post("/wishlist", async (req, res) => {
+  try {
+    const { email, studioId } = req.body;
+    if (!email || !studioId) {
+      return res.status(400).json({ error: "Missing email or studioId" });
+    }
+
+    const normEmail = email.toLowerCase();
+    const entry = await wishlistCollection.findOne({ email: normEmail });
+    let studioIds = entry?.studioIds || [];
+
+    const exists = studioIds.includes(studioId);
+    if (exists) {
+      studioIds = studioIds.filter((id) => id !== studioId);
+    } else {
+      studioIds.push(studioId);
+    }
+
+    await wishlistCollection.updateOne(
+      { email: normEmail },
+      { $set: { studioIds, updatedAt: new Date().toISOString() } },
+      { upsert: true }
+    );
+
+    res.json({
+      message: exists ? "Removed from saved studios." : "Saved to creative wishlist.",
+      saved: !exists,
+      wishlist: studioIds
+    });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to update wishlist", details: err.message });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`StudioNest Server running on port ${PORT}`);
 });
 
 export default app;
+
 
 
 
