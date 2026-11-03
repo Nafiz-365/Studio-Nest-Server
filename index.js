@@ -8,29 +8,30 @@ import { initialStudios } from "./seedData.js";
 const app = express();
 const PORT = process.env.PORT || 8000;
 const CLIENT_URL = process.env.CLIENT_URL || "http://localhost:3000";
+const ALLOW_DEV_AUTH_FALLBACK =
+    process.env.NODE_ENV !== "production" &&
+    process.env.ALLOW_DEV_AUTH_FALLBACK === "true";
 
 // Middleware
-app.use(cors({
-  origin: [
-    "http://localhost:3000",
-    "http://localhost:5173",
-    CLIENT_URL
-  ],
-  credentials: true
-}));
+app.use(
+    cors({
+        origin: ["http://localhost:3000", CLIENT_URL],
+        credentials: true,
+    }),
+);
 app.use(express.json());
 
 const client = new MongoClient(process.env.MONGODB_URI);
 
 export async function connectToMongoDB() {
-  try {
-    await client.connect();
-    console.log("Connected to StudioNest MongoDB Atlas successfully!");
-    return client;
-  } catch (err) {
-    console.error("MongoDB Atlas connection error:", err);
-    throw err;
-  }
+    try {
+        await client.connect();
+        console.log("Connected to StudioNest MongoDB Atlas successfully!");
+        return client;
+    } catch (err) {
+        console.error("MongoDB Atlas connection error:", err);
+        throw err;
+    }
 }
 
 const mongoClient = await connectToMongoDB();
@@ -40,459 +41,752 @@ const studiosCollection = db.collection("studios");
 const bookingsCollection = db.collection("bookings");
 const wishlistCollection = db.collection("wishlists");
 
+const sendServerError = (res, message, error) => {
+    console.error(message, error);
+    return res.status(500).json({
+        error: message,
+        details:
+            process.env.NODE_ENV === "production"
+                ? "Internal server error"
+                : error instanceof Error
+                  ? error.message
+                  : String(error),
+    });
+};
+
+await Promise.all([
+    studiosCollection.createIndex({ ownerEmail: 1 }),
+    studiosCollection.createIndex({ category: 1, rate: 1 }),
+    bookingsCollection.createIndex({ studioId: 1, date: 1, status: 1 }),
+    bookingsCollection.createIndex({ userEmail: 1, createdAt: -1 }),
+    wishlistCollection.createIndex({ email: 1 }, { unique: true }),
+]);
+
 // Automatically seed initial studios if empty on startup
 (async () => {
-  try {
-    const count = await studiosCollection.countDocuments();
-    if (count === 0) {
-      console.log("Empty database detected. Seeding 6 production studios...");
-      await studiosCollection.insertMany(initialStudios);
-      console.log("StudioNest seed completed successfully!");
+    try {
+        const count = await studiosCollection.countDocuments();
+        if (count === 0) {
+            console.log(
+                "Empty database detected. Seeding 6 production studios...",
+            );
+            await studiosCollection.insertMany(initialStudios);
+            console.log("StudioNest seed completed successfully!");
+        }
+    } catch (err) {
+        console.warn("Auto-seed notice:", err.message);
     }
-  } catch (err) {
-    console.warn("Auto-seed notice:", err.message);
-  }
 })();
 
 // JWT Authentication Verification Middleware (matches b14-wanderlust-server pattern)
 export const verifyToken = async (req, res, next) => {
-  const authHeader = req.headers.authorization;
-  if (!authHeader) {
-    return res.status(401).json({ msg: "Unauthorized: Missing authorization header!" });
-  }
-
-  const token = authHeader.split(" ")[1];
-  if (!token) {
-    return res.status(401).json({ msg: "Unauthorized: Token missing!" });
-  }
-
-  try {
-    const JWKS = createRemoteJWKSet(
-      new URL(`${CLIENT_URL}/api/auth/jwks`)
-    );
-    const { payload } = await jwtVerify(token, JWKS);
-    req.user = payload;
-    next();
-  } catch (error) {
-    // Development / Examiner testing fallback for demo accounts
-    const devFallbackEmail = req.headers["x-user-email"];
-    if (devFallbackEmail || token === "demo-token" || process.env.NODE_ENV !== "production") {
-      req.user = {
-        email: devFallbackEmail || "demo@studionest.co",
-        name: "Demo Creator"
-      };
-      return next();
+    const authHeader = req.headers.authorization;
+    if (!authHeader) {
+        return res
+            .status(401)
+            .json({ msg: "Unauthorized: Missing authorization header!" });
     }
-    return res.status(401).json({ msg: "Unauthorized: Invalid or expired token!" });
-  }
+
+    const token = authHeader.split(" ")[1];
+    if (!token) {
+        return res.status(401).json({ msg: "Unauthorized: Token missing!" });
+    }
+
+    try {
+        const JWKS = createRemoteJWKSet(new URL(`${CLIENT_URL}/api/auth/jwks`));
+        const { payload } = await jwtVerify(token, JWKS);
+        req.user = payload;
+        next();
+    } catch (error) {
+        // Keep the fallback disabled unless it is explicitly enabled for local development.
+        const devFallbackEmail = req.headers["x-user-email"];
+        if (
+            ALLOW_DEV_AUTH_FALLBACK &&
+            (devFallbackEmail || token === "demo-token")
+        ) {
+            req.user = {
+                email: devFallbackEmail || "demo@studionest.co",
+                name: "Demo Creator",
+            };
+            return next();
+        }
+        return res
+            .status(401)
+            .json({ msg: "Unauthorized: Invalid or expired token!" });
+    }
 };
 
 // Root Health Check
 app.get("/", (req, res) => {
-  res.json({
-    name: "StudioNest API Server",
-    status: "online",
-    message: "Server is running fine!",
-    timestamp: new Date().toISOString()
-  });
+    res.json({
+        name: "StudioNest API Server",
+        status: "online",
+        message: "Server is running fine!",
+        timestamp: new Date().toISOString(),
+    });
 });
 
 // Seed endpoint for manual triggers
 app.post("/seed-studios", async (req, res) => {
-  try {
-    const count = await studiosCollection.countDocuments();
-    if (count === 0) {
-      const result = await studiosCollection.insertMany(initialStudios);
-      return res.json({ message: "Seeded initial studios successfully!", insertedCount: result.insertedCount });
+    try {
+        const count = await studiosCollection.countDocuments();
+        if (count === 0) {
+            const result = await studiosCollection.insertMany(initialStudios);
+            return res.json({
+                message: "Seeded initial studios successfully!",
+                insertedCount: result.insertedCount,
+            });
+        }
+        res.json({ message: "Database already contains studios.", count });
+    } catch (err) {
+        res.status(500).json({
+            error: "Failed to seed studios",
+            details:
+                process.env.NODE_ENV === "production"
+                    ? "Internal server error"
+                    : err.message,
+        });
     }
-    res.json({ message: "Database already contains studios.", count });
-  } catch (err) {
-    res.status(500).json({ error: "Failed to seed studios", details: err.message });
-  }
 });
 
 // GET /studios - Multi-param filtered studio discovery
 app.get("/studios", async (req, res) => {
-  try {
-    const { category, search, minPrice, maxPrice, sort } = req.query;
-    const query = {};
+    try {
+        const { category, search, minPrice, maxPrice, sort } = req.query;
+        const page = Math.max(1, Number.parseInt(req.query.page, 10) || 1);
+        const requestedLimit = Number.parseInt(req.query.limit, 10);
+        const hasPagination = Number.isFinite(requestedLimit);
+        const limit = Math.min(100, Math.max(1, requestedLimit || 24));
+        const query = {};
 
-    if (category && category !== "All") {
-      query.category = category;
+        if (category && category !== "All") {
+            query.category = category;
+        }
+
+        if (search) {
+            query.$or = [
+                { title: { $regex: search, $options: "i" } },
+                { location: { $regex: search, $options: "i" } },
+                { city: { $regex: search, $options: "i" } },
+                { description: { $regex: search, $options: "i" } },
+                { amenities: { $regex: search, $options: "i" } },
+            ];
+        }
+
+        if (minPrice || maxPrice) {
+            query.rate = {};
+            if (minPrice) query.rate.$gte = Number(minPrice);
+            if (maxPrice) query.rate.$lte = Number(maxPrice);
+        }
+
+        let sortOption = { createdAt: -1 };
+        if (sort === "price_asc") sortOption = { rate: 1 };
+        else if (sort === "price_desc") sortOption = { rate: -1 };
+        else if (sort === "rating_desc") sortOption = { rating: -1 };
+        else if (sort === "newest") sortOption = { createdAt: -1 };
+
+        const cursor = studiosCollection.find(query).sort(sortOption);
+        if (hasPagination) cursor.skip((page - 1) * limit).limit(limit);
+        const studios = await cursor.toArray();
+        if (!hasPagination) return res.json(studios);
+        const total = await studiosCollection.countDocuments(query);
+        res.json({
+            data: studios,
+            pagination: {
+                page,
+                limit,
+                total,
+                totalPages: Math.ceil(total / limit),
+            },
+        });
+    } catch (err) {
+        return sendServerError(res, "Failed to fetch studios", err);
     }
-
-    if (search) {
-      query.$or = [
-        { title: { $regex: search, $options: "i" } },
-        { location: { $regex: search, $options: "i" } },
-        { city: { $regex: search, $options: "i" } },
-        { description: { $regex: search, $options: "i" } },
-        { amenities: { $regex: search, $options: "i" } }
-      ];
-    }
-
-    if (minPrice || maxPrice) {
-      query.rate = {};
-      if (minPrice) query.rate.$gte = Number(minPrice);
-      if (maxPrice) query.rate.$lte = Number(maxPrice);
-    }
-
-    let sortOption = { createdAt: -1 };
-    if (sort === "price_asc") sortOption = { rate: 1 };
-    else if (sort === "price_desc") sortOption = { rate: -1 };
-    else if (sort === "rating_desc") sortOption = { rating: -1 };
-    else if (sort === "newest") sortOption = { createdAt: -1 };
-
-    const studios = await studiosCollection.find(query).sort(sortOption).toArray();
-    res.json(studios);
-  } catch (err) {
-    res.status(500).json({ error: "Failed to fetch studios", details: err.message });
-  }
 });
 
 // GET /featured-studios - Top 6 rated studios using .limit(6)
 app.get("/featured-studios", async (req, res) => {
-  try {
-    const featured = await studiosCollection.find().sort({ rating: -1, createdAt: -1 }).limit(6).toArray();
-    res.json(featured);
-  } catch (err) {
-    res.status(500).json({ error: "Failed to fetch featured studios", details: err.message });
-  }
+    try {
+        const featured = await studiosCollection
+            .find()
+            .sort({ rating: -1, createdAt: -1 })
+            .limit(6)
+            .toArray();
+        res.json(featured);
+    } catch (err) {
+        res.status(500).json({
+            error: "Failed to fetch featured studios",
+            details:
+                process.env.NODE_ENV === "production"
+                    ? "Internal server error"
+                    : err.message,
+        });
+    }
 });
-
 
 // GET /studio/:id - Single studio details
 app.get("/studio/:id", async (req, res) => {
-  try {
-    const { id } = req.params;
-    let studio = null;
+    try {
+        const { id } = req.params;
+        let studio = null;
 
-    if (ObjectId.isValid(id)) {
-      studio = await studiosCollection.findOne({ _id: new ObjectId(id) });
-    }
-    if (!studio) {
-      studio = await studiosCollection.findOne({ id: id });
-    }
+        if (ObjectId.isValid(id)) {
+            studio = await studiosCollection.findOne({ _id: new ObjectId(id) });
+        }
+        if (!studio) {
+            studio = await studiosCollection.findOne({ id: id });
+        }
 
-    if (!studio) {
-      return res.status(404).json({ error: "Studio not found" });
+        if (!studio) {
+            return res.status(404).json({ error: "Studio not found" });
+        }
+        res.json(studio);
+    } catch (err) {
+        res.status(500).json({
+            error: "Failed to fetch studio details",
+            details:
+                process.env.NODE_ENV === "production"
+                    ? "Internal server error"
+                    : err.message,
+        });
     }
-    res.json(studio);
-  } catch (err) {
-    res.status(500).json({ error: "Failed to fetch studio details", details: err.message });
-  }
 });
 
 // GET /my-studios/:email - Studios listed by a specific host
 app.get("/my-studios/:email", verifyToken, async (req, res) => {
-  try {
-    const { email } = req.params;
-    const studios = await studiosCollection.find({
-      ownerEmail: email.toLowerCase()
-    }).sort({ createdAt: -1 }).toArray();
-    res.json(studios);
-  } catch (err) {
-    res.status(500).json({ error: "Failed to fetch host listings", details: err.message });
-  }
+    try {
+        const { email } = req.params;
+        if (
+            !req.user?.email ||
+            req.user.email.toLowerCase() !== email.toLowerCase()
+        ) {
+            return res
+                .status(403)
+                .json({ error: "You can only view your own studio listings." });
+        }
+        const studios = await studiosCollection
+            .find({
+                ownerEmail: email.toLowerCase(),
+            })
+            .sort({ createdAt: -1 })
+            .toArray();
+        res.json(studios);
+    } catch (err) {
+        res.status(500).json({
+            error: "Failed to fetch host listings",
+            details:
+                process.env.NODE_ENV === "production"
+                    ? "Internal server error"
+                    : err.message,
+        });
+    }
 });
-
 
 // POST /add-studio - Create new creative studio listing (Protected)
 app.post("/add-studio", verifyToken, async (req, res) => {
-  try {
-    const data = req.body;
-    const userEmail = req.user?.email || data.ownerEmail;
-    const userName = req.user?.name || data.ownerName;
+    try {
+        const data = req.body;
+        const userEmail = req.user?.email || data.ownerEmail;
+        const userName = req.user?.name || data.ownerName;
 
-    const newStudio = {
-      ...data,
-      ownerEmail: userEmail,
-      ownerName: userName,
-      rating: 5.0,
-      reviewsCount: 1,
-      reviews: [
-        {
-          id: "rev-init",
-          author: "StudioNest Verification",
-          rating: 5,
-          date: new Date().toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }),
-          comment: "Workspace verified by StudioNest production quality review."
-        }
-      ],
-      createdAt: new Date().toISOString()
-    };
+        const newStudio = {
+            ...data,
+            ownerEmail: userEmail,
+            ownerName: userName,
+            rating: 5.0,
+            reviewsCount: 1,
+            reviews: [
+                {
+                    id: "rev-init",
+                    author: "StudioNest Verification",
+                    rating: 5,
+                    date: new Date().toLocaleDateString("en-US", {
+                        month: "short",
+                        day: "numeric",
+                        year: "numeric",
+                    }),
+                    comment:
+                        "Workspace verified by StudioNest production quality review.",
+                },
+            ],
+            createdAt: new Date().toISOString(),
+        };
 
-    const result = await studiosCollection.insertOne(newStudio);
-    res.status(201).json({
-      message: "Studio listing created successfully!",
-      insertedId: result.insertedId,
-      studio: { ...newStudio, _id: result.insertedId }
-    });
-  } catch (err) {
-    res.status(500).json({ error: "Failed to create studio listing", details: err.message });
-  }
+        const result = await studiosCollection.insertOne(newStudio);
+        res.status(201).json({
+            message: "Studio listing created successfully!",
+            insertedId: result.insertedId,
+            studio: { ...newStudio, _id: result.insertedId },
+        });
+    } catch (err) {
+        res.status(500).json({
+            error: "Failed to create studio listing",
+            details:
+                process.env.NODE_ENV === "production"
+                    ? "Internal server error"
+                    : err.message,
+        });
+    }
 });
 
 // PATCH /studio/:id - Update studio listing (Protected)
 app.patch("/studio/:id", verifyToken, async (req, res) => {
-  try {
-    const { id } = req.params;
-    const updateData = req.body;
-    delete updateData._id; // prevent immutable _id update error
+    try {
+        const { id } = req.params;
+        const editableFields = [
+            "title",
+            "category",
+            "rate",
+            "deposit",
+            "capacity",
+            "location",
+            "address",
+            "images",
+            "amenities",
+            "overview",
+            "size",
+            "rules",
+        ];
+        const updateData = Object.fromEntries(
+            editableFields
+                .filter((field) => Object.hasOwn(req.body, field))
+                .map((field) => [field, req.body[field]]),
+        );
+        if (!Object.keys(updateData).length) {
+            return res.status(400).json({
+                error: "No editable studio fields were provided.",
+            });
+        }
 
-    let filter = null;
-    if (ObjectId.isValid(id)) {
-      filter = { _id: new ObjectId(id) };
-    } else {
-      filter = { id: id };
+        let filter = null;
+        if (ObjectId.isValid(id)) {
+            filter = { _id: new ObjectId(id) };
+        } else {
+            filter = { id: id };
+        }
+
+        const existing = await studiosCollection.findOne(filter);
+        if (!existing) {
+            return res.status(404).json({ error: "Studio not found" });
+        }
+
+        // Verify ownership
+        if (
+            req.user?.email &&
+            existing.ownerEmail &&
+            existing.ownerEmail.toLowerCase() !== req.user.email.toLowerCase()
+        ) {
+            return res.status(403).json({
+                error: "Unauthorized: You can only edit your own studio listings.",
+            });
+        }
+
+        updateData.updatedAt = new Date().toISOString();
+        const result = await studiosCollection.updateOne(filter, {
+            $set: updateData,
+        });
+
+        res.json({
+            message: "Studio details updated successfully!",
+            modifiedCount: result.modifiedCount,
+        });
+    } catch (err) {
+        res.status(500).json({
+            error: "Failed to update studio listing",
+            details:
+                process.env.NODE_ENV === "production"
+                    ? "Internal server error"
+                    : err.message,
+        });
     }
-
-    const existing = await studiosCollection.findOne(filter);
-    if (!existing) {
-      return res.status(404).json({ error: "Studio not found" });
-    }
-
-    // Verify ownership
-    if (req.user?.email && existing.ownerEmail && existing.ownerEmail.toLowerCase() !== req.user.email.toLowerCase()) {
-      return res.status(403).json({ error: "Unauthorized: You can only edit your own studio listings." });
-    }
-
-    updateData.updatedAt = new Date().toISOString();
-    const result = await studiosCollection.updateOne(filter, { $set: updateData });
-
-    res.json({
-      message: "Studio details updated successfully!",
-      modifiedCount: result.modifiedCount
-    });
-  } catch (err) {
-    res.status(500).json({ error: "Failed to update studio listing", details: err.message });
-  }
 });
 
 // DELETE /studio/:id - Remove studio listing (Protected)
 app.delete("/studio/:id", verifyToken, async (req, res) => {
-  try {
-    const { id } = req.params;
-    let filter = null;
-    if (ObjectId.isValid(id)) {
-      filter = { _id: new ObjectId(id) };
-    } else {
-      filter = { id: id };
+    try {
+        const { id } = req.params;
+        let filter = null;
+        if (ObjectId.isValid(id)) {
+            filter = { _id: new ObjectId(id) };
+        } else {
+            filter = { id: id };
+        }
+
+        const existing = await studiosCollection.findOne(filter);
+        if (!existing) {
+            return res
+                .status(404)
+                .json({ error: "Studio already removed or not found" });
+        }
+
+        // Verify ownership
+        if (
+            req.user?.email &&
+            existing.ownerEmail &&
+            existing.ownerEmail.toLowerCase() !== req.user.email.toLowerCase()
+        ) {
+            return res.status(403).json({
+                error: "Unauthorized: You can only delete your own studio listings.",
+            });
+        }
+
+        const result = await studiosCollection.deleteOne(filter);
+        // Cascade cleanup: remove pending bookings for this studio
+        await bookingsCollection.updateMany(
+            { studioId: id, status: "Pending" },
+            {
+                $set: {
+                    status: "Cancelled",
+                    cancelledAt: new Date().toISOString(),
+                    cancellationReason: "Studio listing removed",
+                },
+            },
+        );
+
+        res.json({
+            message: `${existing.title} removed successfully!`,
+            deletedCount: result.deletedCount,
+        });
+    } catch (err) {
+        res.status(500).json({
+            error: "Failed to delete studio",
+            details:
+                process.env.NODE_ENV === "production"
+                    ? "Internal server error"
+                    : err.message,
+        });
     }
-
-    const existing = await studiosCollection.findOne(filter);
-    if (!existing) {
-      return res.status(404).json({ error: "Studio already removed or not found" });
-    }
-
-    // Verify ownership
-    if (req.user?.email && existing.ownerEmail && existing.ownerEmail.toLowerCase() !== req.user.email.toLowerCase()) {
-      return res.status(403).json({ error: "Unauthorized: You can only delete your own studio listings." });
-    }
-
-    const result = await studiosCollection.deleteOne(filter);
-    // Cascade cleanup: remove pending bookings for this studio
-    await bookingsCollection.deleteMany({ studioId: id });
-
-    res.json({
-      message: `${existing.title} removed successfully!`,
-      deletedCount: result.deletedCount
-    });
-  } catch (err) {
-    res.status(500).json({ error: "Failed to delete studio", details: err.message });
-  }
 });
-
 
 // Helper: Calculate session hours
 function calculateHours(startTime, endTime) {
-  const [startH, startM] = startTime.split(":").map(Number);
-  const [endH, endM] = endTime.split(":").map(Number);
-  const diffInMinutes = endH * 60 + endM - (startH * 60 + startM);
-  return Math.max(1, Math.round(diffInMinutes / 60));
+    const [startH, startM] = startTime.split(":").map(Number);
+    const [endH, endM] = endTime.split(":").map(Number);
+    const diffInMinutes = endH * 60 + endM - (startH * 60 + startM);
+    return diffInMinutes / 60;
 }
 
 // POST /booking - Smart reservation with double-booking collision prevention
-app.post("/booking", async (req, res) => {
-  try {
-    const data = req.body;
-    const { studioId, date, startTime, endTime } = data;
+app.post("/booking", verifyToken, async (req, res) => {
+    try {
+        const data = {
+            ...req.body,
+            userEmail: req.user?.email || req.body.userEmail,
+            userName: req.user?.name || req.body.userName,
+        };
+        const { studioId, date, startTime, endTime } = data;
 
-    if (!studioId || !date || !startTime || !endTime) {
-      return res.status(400).json({ error: "Missing required booking details (studioId, date, startTime, endTime)." });
+        if (!studioId || !date || !startTime || !endTime) {
+            return res.status(400).json({
+                error: "Missing required booking details (studioId, date, startTime, endTime).",
+            });
+        }
+
+        const timePattern = /^([01]\d|2[0-3]):[0-5]\d$/;
+        if (
+            !/^\d{4}-\d{2}-\d{2}$/.test(date) ||
+            !timePattern.test(startTime) ||
+            !timePattern.test(endTime)
+        ) {
+            return res.status(400).json({
+                error: "Invalid booking date or time format.",
+            });
+        }
+
+        const requestedDate = new Date(`${date}T00:00:00`);
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        const reqStart = new Date(`${date}T${startTime}:00`).getTime();
+        const reqEnd = new Date(`${date}T${endTime}:00`).getTime();
+        if (
+            Number.isNaN(requestedDate.getTime()) ||
+            requestedDate < today ||
+            !Number.isFinite(reqStart) ||
+            !Number.isFinite(reqEnd) ||
+            reqEnd <= reqStart ||
+            reqEnd - reqStart < 60 * 60 * 1000
+        ) {
+            return res.status(400).json({
+                error: "Choose a future date and a session of at least one hour.",
+            });
+        }
+
+        const studioFilter = ObjectId.isValid(studioId)
+            ? { _id: new ObjectId(studioId) }
+            : { id: studioId };
+        const studio = await studiosCollection.findOne(studioFilter);
+        if (!studio) {
+            return res.status(404).json({ error: "Studio not found" });
+        }
+        if (
+            !Number.isInteger(data.guests) ||
+            data.guests < 1 ||
+            data.guests > studio.capacity
+        ) {
+            return res.status(400).json({
+                error: `Guest count must be between 1 and ${studio.capacity}.`,
+            });
+        }
+
+        // 1. Collision detection: Prevent double booking
+        const overlappingBookings = await bookingsCollection
+            .find({
+                studioId: studioId,
+                date: date,
+                status: { $in: ["Confirmed", "Pending"] },
+            })
+            .toArray();
+
+        const collision = overlappingBookings.find((b) => {
+            const bStart = new Date(`${b.date}T${b.startTime}:00`).getTime();
+            const bEnd = new Date(`${b.date}T${b.endTime}:00`).getTime();
+            return reqStart < bEnd && reqEnd > bStart;
+        });
+
+        if (collision) {
+            return res.status(409).json({
+                error: "Double booking collision detected",
+                message: `This workspace is already reserved from ${collision.startTime} to ${collision.endTime} on ${date}. Please choose another time slot.`,
+            });
+        }
+
+        // 2. Fetch studio to compute exact financial breakdown
+        const rate = studio.rate;
+        const deposit = studio.deposit;
+        const hours = calculateHours(startTime, endTime);
+        const subtotal = hours * rate;
+        const serviceFee = Math.round(subtotal * 0.08); // 8% platform fee
+        const total = subtotal + serviceFee + deposit;
+
+        const newBooking = {
+            ...data,
+            hours,
+            rate,
+            subtotal,
+            serviceFee,
+            deposit,
+            total,
+            status: "Pending",
+            createdAt: new Date().toISOString(),
+        };
+
+        const result = await bookingsCollection.insertOne(newBooking);
+
+        res.status(201).json({
+            message: "Studio reserved successfully! Confirmation generated.",
+            insertedId: result.insertedId,
+            booking: { ...newBooking, _id: result.insertedId },
+        });
+    } catch (err) {
+        res.status(500).json({
+            error: "Failed to create booking reservation",
+            details:
+                process.env.NODE_ENV === "production"
+                    ? "Internal server error"
+                    : err.message,
+        });
     }
-
-    // 1. Collision detection: Prevent double booking
-    const overlappingBookings = await bookingsCollection.find({
-      studioId: studioId,
-      date: date,
-      status: { $in: ["Confirmed", "Pending"] }
-    }).toArray();
-
-    const reqStart = new Date(`${date}T${startTime}:00`).getTime();
-    const reqEnd = new Date(`${date}T${endTime}:00`).getTime();
-
-    const collision = overlappingBookings.find((b) => {
-      const bStart = new Date(`${b.date}T${b.startTime}:00`).getTime();
-      const bEnd = new Date(`${b.date}T${b.endTime}:00`).getTime();
-      return reqStart < bEnd && reqEnd > bStart;
-    });
-
-    if (collision) {
-      return res.status(409).json({
-        error: "Double booking collision detected",
-        message: `This workspace is already reserved from ${collision.startTime} to ${collision.endTime} on ${date}. Please choose another time slot.`
-      });
-    }
-
-    // 2. Fetch studio to compute exact financial breakdown
-    let studioFilter = ObjectId.isValid(studioId) ? { _id: new ObjectId(studioId) } : { id: studioId };
-    const studio = await studiosCollection.findOne(studioFilter);
-
-    const rate = studio?.rate || data.rate || 100;
-    const deposit = studio?.deposit ?? (data.deposit ?? 150);
-    const hours = calculateHours(startTime, endTime);
-    const subtotal = hours * rate;
-    const serviceFee = Math.round(subtotal * 0.08); // 8% platform fee
-    const total = subtotal + serviceFee + deposit;
-
-    const newBooking = {
-      ...data,
-      hours,
-      rate,
-      subtotal,
-      serviceFee,
-      deposit,
-      total,
-      status: data.status || "Pending",
-      createdAt: new Date().toISOString()
-    };
-
-    const result = await bookingsCollection.insertOne(newBooking);
-
-    res.status(201).json({
-      message: "Studio reserved successfully! Confirmation generated.",
-      insertedId: result.insertedId,
-      booking: { ...newBooking, _id: result.insertedId }
-    });
-  } catch (err) {
-    res.status(500).json({ error: "Failed to create booking reservation", details: err.message });
-  }
 });
-
 
 // GET /my-bookings/:email - User bookings retrieval (Protected)
 app.get("/my-bookings/:email", verifyToken, async (req, res) => {
-  try {
-    const { email } = req.params;
-    const bookings = await bookingsCollection
-      .find({ userEmail: email.toLowerCase() })
-      .sort({ createdAt: -1 })
-      .toArray();
+    try {
+        const { email } = req.params;
+        if (
+            !req.user?.email ||
+            req.user.email.toLowerCase() !== email.toLowerCase()
+        ) {
+            return res
+                .status(403)
+                .json({ error: "You can only view your own bookings." });
+        }
+        const bookings = await bookingsCollection
+            .find({ userEmail: email.toLowerCase() })
+            .sort({ createdAt: -1 })
+            .toArray();
 
-    res.json(bookings);
-  } catch (err) {
-    res.status(500).json({ error: "Failed to fetch user bookings", details: err.message });
-  }
+        res.json(bookings);
+    } catch (err) {
+        res.status(500).json({
+            error: "Failed to fetch user bookings",
+            details:
+                process.env.NODE_ENV === "production"
+                    ? "Internal server error"
+                    : err.message,
+        });
+    }
 });
 
 // PATCH /booking/:id/cancel - Cancel pending booking
 app.patch("/booking/:id/cancel", verifyToken, async (req, res) => {
-  try {
-    const { id } = req.params;
-    let filter = ObjectId.isValid(id) ? { _id: new ObjectId(id) } : { id: id };
+    try {
+        const { id } = req.params;
+        let filter = ObjectId.isValid(id)
+            ? { _id: new ObjectId(id) }
+            : { id: id };
 
-    const booking = await bookingsCollection.findOne(filter);
-    if (!booking) {
-      return res.status(404).json({ error: "Reservation not found" });
+        const booking = await bookingsCollection.findOne(filter);
+        if (!booking) {
+            return res.status(404).json({ error: "Reservation not found" });
+        }
+        if (
+            !req.user?.email ||
+            booking.userEmail?.toLowerCase() !== req.user.email.toLowerCase()
+        ) {
+            return res
+                .status(403)
+                .json({ error: "You can only cancel your own bookings." });
+        }
+
+        if (booking.status !== "Pending") {
+            return res.status(400).json({
+                error: "Only Pending reservations can be cancelled directly.",
+            });
+        }
+
+        const result = await bookingsCollection.updateOne(filter, {
+            $set: {
+                status: "Cancelled",
+                cancelledAt: new Date().toISOString(),
+            },
+        });
+
+        res.json({
+            message: "Reservation successfully cancelled.",
+            modifiedCount: result.modifiedCount,
+        });
+    } catch (err) {
+        res.status(500).json({
+            error: "Failed to cancel reservation",
+            details:
+                process.env.NODE_ENV === "production"
+                    ? "Internal server error"
+                    : err.message,
+        });
     }
-
-    if (booking.status !== "Pending") {
-      return res.status(400).json({ error: "Only Pending reservations can be cancelled directly." });
-    }
-
-    const result = await bookingsCollection.updateOne(filter, {
-      $set: { status: "Cancelled", cancelledAt: new Date().toISOString() }
-    });
-
-    res.json({
-      message: "Reservation successfully cancelled.",
-      modifiedCount: result.modifiedCount
-    });
-  } catch (err) {
-    res.status(500).json({ error: "Failed to cancel reservation", details: err.message });
-  }
 });
 
 // DELETE /my-bookings/:id - Remove booking entry
 app.delete("/my-bookings/:id", verifyToken, async (req, res) => {
-  try {
-    const { id } = req.params;
-    let filter = ObjectId.isValid(id) ? { _id: new ObjectId(id) } : { id: id };
+    try {
+        const { id } = req.params;
+        let filter = ObjectId.isValid(id)
+            ? { _id: new ObjectId(id) }
+            : { id: id };
 
-    const result = await bookingsCollection.deleteOne(filter);
-    if (result.deletedCount === 0) {
-      return res.status(404).json({ error: "Booking not found or already deleted" });
+        const booking = await bookingsCollection.findOne(filter);
+        if (
+            !booking ||
+            !req.user?.email ||
+            booking.userEmail?.toLowerCase() !== req.user.email.toLowerCase()
+        ) {
+            return res
+                .status(403)
+                .json({ error: "You can only remove your own bookings." });
+        }
+
+        const result = await bookingsCollection.deleteOne(filter);
+        if (result.deletedCount === 0) {
+            return res
+                .status(404)
+                .json({ error: "Booking not found or already deleted" });
+        }
+
+        res.json({
+            message: "Booking removed successfully",
+            deletedCount: result.deletedCount,
+        });
+    } catch (err) {
+        res.status(500).json({
+            error: "Failed to delete booking",
+            details:
+                process.env.NODE_ENV === "production"
+                    ? "Internal server error"
+                    : err.message,
+        });
     }
-
-    res.json({ message: "Booking removed successfully", deletedCount: result.deletedCount });
-  } catch (err) {
-    res.status(500).json({ error: "Failed to delete booking", details: err.message });
-  }
 });
 
 // GET /wishlist/:email - Retrieve user saved studio IDs
-app.get("/wishlist/:email", async (req, res) => {
-  try {
-    const { email } = req.params;
-    const entry = await wishlistCollection.findOne({ email: email.toLowerCase() });
-    res.json({ wishlist: entry?.studioIds || [] });
-  } catch (err) {
-    res.status(500).json({ error: "Failed to fetch wishlist", details: err.message });
-  }
+app.get("/wishlist/:email", verifyToken, async (req, res) => {
+    try {
+        const { email } = req.params;
+        if (
+            !req.user?.email ||
+            req.user.email.toLowerCase() !== email.toLowerCase()
+        ) {
+            return res
+                .status(403)
+                .json({ error: "You can only view your own wishlist." });
+        }
+        const entry = await wishlistCollection.findOne({
+            email: email.toLowerCase(),
+        });
+        res.json({ wishlist: entry?.studioIds || [] });
+    } catch (err) {
+        res.status(500).json({
+            error: "Failed to fetch wishlist",
+            details:
+                process.env.NODE_ENV === "production"
+                    ? "Internal server error"
+                    : err.message,
+        });
+    }
 });
 
 // POST /wishlist - Toggle studio saved state
-app.post("/wishlist", async (req, res) => {
-  try {
-    const { email, studioId } = req.body;
-    if (!email || !studioId) {
-      return res.status(400).json({ error: "Missing email or studioId" });
+app.post("/wishlist", verifyToken, async (req, res) => {
+    try {
+        const { email, studioId } = req.body;
+        if (!email || !studioId) {
+            return res.status(400).json({ error: "Missing email or studioId" });
+        }
+        if (
+            !req.user?.email ||
+            req.user.email.toLowerCase() !== email.toLowerCase()
+        ) {
+            return res
+                .status(403)
+                .json({ error: "You can only update your own wishlist." });
+        }
+
+        const normEmail = email.toLowerCase();
+        const entry = await wishlistCollection.findOne({ email: normEmail });
+        let studioIds = entry?.studioIds || [];
+
+        const exists = studioIds.includes(studioId);
+        if (exists) {
+            studioIds = studioIds.filter((id) => id !== studioId);
+        } else {
+            studioIds.push(studioId);
+        }
+
+        await wishlistCollection.updateOne(
+            { email: normEmail },
+            { $set: { studioIds, updatedAt: new Date().toISOString() } },
+            { upsert: true },
+        );
+
+        res.json({
+            message: exists
+                ? "Removed from saved studios."
+                : "Saved to creative wishlist.",
+            saved: !exists,
+            wishlist: studioIds,
+        });
+    } catch (err) {
+        res.status(500).json({
+            error: "Failed to update wishlist",
+            details:
+                process.env.NODE_ENV === "production"
+                    ? "Internal server error"
+                    : err.message,
+        });
     }
-
-    const normEmail = email.toLowerCase();
-    const entry = await wishlistCollection.findOne({ email: normEmail });
-    let studioIds = entry?.studioIds || [];
-
-    const exists = studioIds.includes(studioId);
-    if (exists) {
-      studioIds = studioIds.filter((id) => id !== studioId);
-    } else {
-      studioIds.push(studioId);
-    }
-
-    await wishlistCollection.updateOne(
-      { email: normEmail },
-      { $set: { studioIds, updatedAt: new Date().toISOString() } },
-      { upsert: true }
-    );
-
-    res.json({
-      message: exists ? "Removed from saved studios." : "Saved to creative wishlist.",
-      saved: !exists,
-      wishlist: studioIds
-    });
-  } catch (err) {
-    res.status(500).json({ error: "Failed to update wishlist", details: err.message });
-  }
 });
 
 app.listen(PORT, () => {
-  console.log(`StudioNest Server running on port ${PORT}`);
+    console.log(`StudioNest Server running on port ${PORT}`);
 });
 
 export default app;
-
-
-
-
