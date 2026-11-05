@@ -1,137 +1,216 @@
-# StudioNest API
+# StudioNest Server
 
-The StudioNest API is an Express and MongoDB service for a peer-to-peer
-creative studio marketplace. It supports public studio discovery and protected
-studio management, booking, cancellation, and wishlist operations for the
-companion Next.js client.
+StudioNest Server is the backend API for the StudioNest marketplace platform. It powers studio discovery, host management, reservations, and wishlist features for a companion frontend application.
 
-## Highlights
+The service is built with Node.js, Express, and MongoDB, and it validates requests using Better Auth JWTs obtained from the frontend JWKS endpoint.
 
-- MongoDB Atlas integration using the official MongoDB driver.
-- Better Auth JWT verification through the frontend JWKS endpoint.
-- Ownership-protected studio listing management.
-- Booking validation for dates, times, guest capacity, and overlapping
-  pending/confirmed reservations.
-- Calendar-accurate booking date validation and transactional listing removal
-  with pending-booking cancellation.
-- Server-controlled pending booking status and protected booking cancellation.
-- Wishlist persistence with atomic saved-state updates, production-safe error
-  responses, CORS configuration, startup seed data, pagination, and query
-  indexes.
-- Backward-compatible array responses for `/studios` plus optional pagination.
+## Overview
 
-## Technology
+This backend is responsible for:
 
-- Node.js with native ES modules
+- Public studio catalog browsing and search
+- Host-owned studio creation, editing, and deletion
+- Booking request creation, validation, and host review
+- Booking cancellation and conflict prevention
+- User wishlist management
+- Startup data seeding and MongoDB index creation
+- Auth-protected ownership checks for sensitive actions
+
+## Tech Stack
+
+- Node.js 20+
 - Express 4
-- MongoDB driver
-- `jose` for remote JWKS JWT verification
-- `cors`, `dotenv`, and `nodemon`
+- MongoDB with official MongoDB Node driver
+- `jose` for JWT/JWKS verification
+- `cors` and `dotenv`
+- `nodemon` for local development
 
-## API endpoints
+## Project Structure
 
-| Method   | Endpoint                     | Auth | Purpose                                                                      |
-| -------- | ---------------------------- | :--: | ---------------------------------------------------------------------------- |
-| `GET`    | `/`                          |  No  | Health check                                                                 |
-| `POST`   | `/seed-studios`              |  No  | Seed studios when the collection is empty                                    |
-| `GET`    | `/studios`                   |  No  | Search, filter, sort, and optionally paginate studios                        |
-| `GET`    | `/featured-studios`          |  No  | Return the six highest-rated studios                                         |
-| `GET`    | `/studio/:id`                |  No  | Read a studio by MongoDB `_id` or application ID                             |
-| `POST`   | `/add-studio`                | JWT  | Create a studio owned by the authenticated user                              |
-| `PATCH`  | `/studio/:id`                | JWT  | Update editable fields of an owned studio                                    |
-| `DELETE` | `/studio/:id`                | JWT  | Remove an owned studio and cancel pending bookings                           |
-| `POST`   | `/booking`                   | JWT  | Create a validated pending booking request                                   |
-| `GET`    | `/my-bookings/:email`        | JWT  | Read the authenticated user's bookings                                       |
-| `GET`    | `/host-bookings`             | JWT  | Read requests for the authenticated host's studios                           |
-| `PATCH`  | `/booking/:id/cancel`        | JWT  | Cancel an owned pending booking                                              |
-| `PATCH`  | `/booking/:id/host-decision` | JWT  | Confirm or decline a request for an owned studio (`Confirmed` or `Declined`) |
-| `DELETE` | `/my-bookings/:id`           | JWT  | Delete an owned booking record                                               |
-| `GET`    | `/my-studios/:email`         | JWT  | Read the authenticated user's listings                                       |
-| `GET`    | `/wishlist/:email`           | JWT  | Read saved studio IDs                                                        |
-| `POST`   | `/wishlist`                  | JWT  | Set a studio's saved state                                                   |
+```text
+studio-nest-server/
+├── index.js            # API routes, validation, MongoDB logic, auth middleware
+├── seedData.js         # Seed studio catalog data
+├── .env.example        # Example environment variables
+├── .env                # Local environment file (not committed)
+├── package.json        # Project scripts and dependencies
+├── README.md           # Project documentation
+└── node_modules/       # Installed dependencies
+```
 
-### Studio discovery query parameters
+## Features
 
-`GET /studios` accepts `category`, `search`, `minPrice`, `maxPrice`, and
-`sort`. Supported sort values are `price_asc`, `price_desc`, `rating_desc`,
-and `newest`.
+- MongoDB Atlas integration with automatic collection index creation
+- JWT-based auth with remote JWKS validation
+- Local-only dev authentication fallback (`ALLOW_DEV_AUTH_FALLBACK`) for testing
+- Protected access to owner-only listing and booking actions
+- Booking validation for:
+    - valid date and time format
+    - future bookings only
+    - minimum one-hour duration
+    - guest count validation
+    - overlapping booking checks for pending and confirmed reservations
+- Studio image validation for URLs and bounded base64 data URLs
+- Production-safe error handling
+- Pagination support for studio discovery requests
+- Auto-seeding when the `studios` collection is empty
 
-For paginated results, add `page` and `limit`:
+## Requirements
+
+Before running the project, make sure you have:
+
+- Node.js 20 or newer
+- MongoDB connection access
+- A frontend app running with the configured `CLIENT_URL`
+- A valid Better Auth/JWKS setup for the frontend
+
+## Installation
+
+```bash
+npm install
+cp .env.example .env
+npm run dev
+```
+
+For production mode:
+
+```bash
+npm start
+```
+
+The server listens on:
+
+```text
+http://localhost:8000
+```
+
+## Environment Variables
+
+Create a `.env` file using the `.env.example` template.
+
+| Variable                  | Required | Description                                               |
+| ------------------------- | :------: | --------------------------------------------------------- |
+| `PORT`                    |    No    | API port, defaults to `8000`                              |
+| `MONGODB_URI`             |   Yes    | MongoDB connection string                                 |
+| `CLIENT_URL`              |   Yes    | Frontend base URL used for CORS and JWKS lookup           |
+| `ALLOW_DEV_AUTH_FALLBACK` |    No    | Enables local-only non-production fallback authentication |
+| `NODE_ENV`                |    No    | Usually set to `development` or `production`              |
+
+Important:
+
+- Keep `ALLOW_DEV_AUTH_FALLBACK=false` outside local development.
+- Never commit secrets, credentials, or database URLs to source control.
+
+## Authentication Model
+
+Protected routes verify the incoming JWT by fetching the frontend JWKS from:
+
+```text
+${CLIENT_URL}/api/auth/jwks
+```
+
+The API enforces ownership checks before allowing:
+
+- studio edits
+- studio deletion
+- booking cancellation by the user
+- host booking decisions
+- wishlist updates
+- host listing access
+
+This keeps sensitive operations tied to the authenticated account rather than trusting client-side values alone.
+
+## API Endpoints
+
+| Method   | Endpoint                     | Auth | Purpose                                       |
+| -------- | ---------------------------- | :--: | --------------------------------------------- |
+| `GET`    | `/`                          |  No  | Health check                                  |
+| `POST`   | `/seed-studios`              |  No  | Seed the studio collection when empty         |
+| `GET`    | `/studios`                   |  No  | Browse and filter studios                     |
+| `GET`    | `/featured-studios`          |  No  | Return the top six highest-rated studios      |
+| `GET`    | `/studio/:id`                |  No  | Fetch one studio by MongoDB `_id` or app ID   |
+| `POST`   | `/add-studio`                | JWT  | Create a new studio listing                   |
+| `PATCH`  | `/studio/:id`                | JWT  | Update editable studio data                   |
+| `DELETE` | `/studio/:id`                | JWT  | Remove a studio and cancel pending bookings   |
+| `POST`   | `/booking`                   | JWT  | Create a new reservation request              |
+| `GET`    | `/my-bookings/:email`        | JWT  | Fetch bookings for the authenticated user     |
+| `GET`    | `/host-bookings`             | JWT  | Fetch booking requests for host-owned studios |
+| `PATCH`  | `/booking/:id/cancel`        | JWT  | Cancel a pending booking                      |
+| `PATCH`  | `/booking/:id/host-decision` | JWT  | Confirm or decline a booking request          |
+| `DELETE` | `/my-bookings/:id`           | JWT  | Remove a booking record                       |
+| `GET`    | `/my-studios/:email`         | JWT  | Fetch studios owned by the authenticated host |
+| `GET`    | `/wishlist/:email`           | JWT  | Read saved studio IDs for a user              |
+| `POST`   | `/wishlist`                  | JWT  | Add or remove a studio from the wishlist      |
+
+### Studio Search and Filtering
+
+`GET /studios` supports these query parameters:
+
+- `category`
+- `search`
+- `minPrice`
+- `maxPrice`
+- `sort`
+- `page`
+- `limit`
+
+Supported sort values:
+
+- `price_asc`
+- `price_desc`
+- `rating_desc`
+- `newest`
+
+Example:
 
 ```text
 /studios?page=1&limit=24&sort=rating_desc
 ```
 
-The maximum page size is `100`. Without pagination parameters, the endpoint
-keeps returning the studio array expected by the current client.
+Without pagination, the endpoint returns a raw array of studios for compatibility with the existing client.
 
-## Local development
+## Database Collections
 
-### Prerequisites
+The server uses MongoDB collections for the following data:
 
-- Node.js 20 or newer
-- A MongoDB connection string
-- The companion frontend running on the configured client URL
+- `studios` — studio listings, host data, images, reviews, and details
+- `bookings` — bookings, statuses, date/time slots, and cancellation metadata
+- `wishlists` — saved studio IDs per normalized user email
 
-### Setup
+Startup logic creates indexes for:
 
-```bash
-npm install
-Copy-Item .env.example .env
-npm run dev
-```
+- owner-specific studio lookup
+- category and rate filtering
+- booking collision detection
+- user booking retrieval
+- wishlist lookup
 
-The API starts on [http://localhost:8000](http://localhost:8000) by default.
-Use `npm start` for the production process.
+## Seed Data
 
-### Environment variables
+The application automatically seeds demo studios when the `studios` collection is empty. The seed data comes from `seedData.js` and contains production-style studio examples such as photo studios, film stages, and podcast lounges.
 
-| Variable                  | Required | Purpose                             |
-| ------------------------- | :------: | ----------------------------------- |
-| `PORT`                    |    No    | API port; defaults to `8000`        |
-| `MONGODB_URI`             |   Yes    | MongoDB connection string           |
-| `CLIENT_URL`              |   Yes    | Frontend origin and JWKS base URL   |
-| `ALLOW_DEV_AUTH_FALLBACK` |    No    | Explicit local-only fallback switch |
+## Security and Validation
 
-Keep `ALLOW_DEV_AUTH_FALLBACK=false` in shared and production environments.
-The fallback accepts `x-user-email` only when explicitly enabled for local
-testing and is not an authentication mechanism.
+The backend includes several safeguards:
 
-## Security and data integrity
+- JWT verification through remote JWKS
+- Owner-only access enforcement for listing and booking actions
+- Restricted editable fields for studio updates
+- validation of booking date/time inputs
+- overlap protection for concurrent reservations
+- restricted image formats and size constraints
+- bounded JSON size (`10mb`)
+- production-safe server error responses
 
-- Protected routes verify Better Auth JWTs using the frontend JWKS endpoint.
-  The companion Next.js app reads its HttpOnly auth session cookie and proxies
-  private API requests server-side; the JWT is never returned to browser code.
-- Studio updates accept only approved editable fields.
-- Studio updates and deletion require an existing owner email matching the
-  authenticated account.
-- Studio listing, booking, cancellation, deletion, and wishlist operations
-  verify the authenticated user's ownership.
-- New bookings are always created as `Pending`; clients cannot confirm them.
-- Studio galleries accept up to six HTTP(S) or bounded JPEG/PNG/WebP data URLs.
-- JSON request bodies are limited to 10 MB to support the bounded local image
-  fallback without accepting unbounded payloads.
-- Historical confirmed/completed bookings are preserved when a studio is
-  removed; pending bookings are cancelled with a reason.
-- Production responses hide internal error details while server logs retain
-  diagnostic information.
-- Startup indexes support owner listings, booking collision queries, user
-  bookings, category/rate filtering, and wishlist lookups.
+## Production Checklist
 
-## Database collections
+1. Set a valid `MONGODB_URI` and `CLIENT_URL`.
+2. Keep `ALLOW_DEV_AUTH_FALLBACK=false` in production.
+3. Use the real frontend origin in CORS configuration.
+4. Run the app with `npm start` in deployment.
+5. Ensure the frontend points to the deployed API endpoint.
+6. Never commit `.env`, secrets, or credentials.
 
-- `studios` — studio metadata, availability-related details, hosts, and reviews
-- `bookings` — reservation windows, financial breakdowns, and status history
-- `wishlists` — one saved-studio list per normalized user email
+## Notes
 
-The server automatically inserts the bundled seed studios when the `studios`
-collection is empty.
-
-## Production checklist
-
-1. Set a strong `MONGODB_URI`, `CLIENT_URL`, and Better Auth configuration.
-2. Keep `ALLOW_DEV_AUTH_FALLBACK=false`.
-3. Configure CORS with the real deployed frontend origin.
-4. Run `npm start` from the backend deployment.
-5. Confirm the frontend points `NEXT_PUBLIC_API_BASE_URL` to this API.
-6. Never commit `.env`, credentials, JWT secrets, or database URLs.
+This project is designed to work with a frontend application that handles the user session and proxies API requests securely. The server is intentionally strict about ownership validation and reservation integrity so that listing operations and bookings remain consistent.
