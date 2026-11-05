@@ -19,7 +19,30 @@ app.use(
         credentials: true,
     }),
 );
-app.use(express.json());
+app.use(express.json({ limit: "10mb" }));
+
+const MAX_STUDIO_IMAGES = 6;
+const MAX_DATA_IMAGE_LENGTH = 1_250_000;
+
+function isValidStudioImages(images) {
+    return (
+        Array.isArray(images) &&
+        images.length > 0 &&
+        images.length <= MAX_STUDIO_IMAGES &&
+        images.every((image) => {
+            if (typeof image !== "string") return false;
+            if (/^data:image\/(?:jpeg|png|webp);base64,/i.test(image)) {
+                return image.length <= MAX_DATA_IMAGE_LENGTH;
+            }
+            if (image.length > 2048) return false;
+            try {
+                return ["http:", "https:"].includes(new URL(image).protocol);
+            } catch {
+                return false;
+            }
+        })
+    );
+}
 
 const client = new MongoClient(process.env.MONGODB_URI);
 
@@ -95,6 +118,11 @@ export const verifyToken = async (req, res, next) => {
     try {
         const JWKS = createRemoteJWKSet(new URL(`${CLIENT_URL}/api/auth/jwks`));
         const { payload } = await jwtVerify(token, JWKS);
+        if (typeof payload.email !== "string" || !payload.email.trim()) {
+            return res
+                .status(401)
+                .json({ msg: "Unauthorized: Token has no valid user email." });
+        }
         req.user = payload;
         next();
     } catch (error) {
@@ -163,13 +191,19 @@ app.get("/studios", async (req, res) => {
             query.category = category;
         }
 
-        if (search) {
+        const searchTerm =
+            typeof search === "string" ? search.trim().slice(0, 100) : "";
+        if (searchTerm) {
+            const escapedSearch = searchTerm.replace(
+                /[.*+?^${}()|[\]\\]/g,
+                "\\$&",
+            );
             query.$or = [
-                { title: { $regex: search, $options: "i" } },
-                { location: { $regex: search, $options: "i" } },
-                { city: { $regex: search, $options: "i" } },
-                { description: { $regex: search, $options: "i" } },
-                { amenities: { $regex: search, $options: "i" } },
+                { title: { $regex: escapedSearch, $options: "i" } },
+                { location: { $regex: escapedSearch, $options: "i" } },
+                { city: { $regex: escapedSearch, $options: "i" } },
+                { description: { $regex: escapedSearch, $options: "i" } },
+                { amenities: { $regex: escapedSearch, $options: "i" } },
             ];
         }
 
@@ -282,33 +316,55 @@ app.get("/my-studios/:email", verifyToken, async (req, res) => {
     }
 });
 
+// GET /host-bookings - Requests for studios owned by the authenticated host
+app.get("/host-bookings", verifyToken, async (req, res) => {
+    try {
+        const ownedStudios = await studiosCollection
+            .find(
+                { ownerEmail: req.user.email.toLowerCase() },
+                { projection: { _id: 1, id: 1 } },
+            )
+            .toArray();
+        const studioIds = ownedStudios.flatMap((studio) =>
+            [studio.id, studio._id?.toString()].filter(
+                (id) => typeof id === "string" && id.length > 0,
+            ),
+        );
+        if (!studioIds.length) return res.json([]);
+
+        const requests = await bookingsCollection
+            .find({ studioId: { $in: studioIds } })
+            .sort({ createdAt: -1 })
+            .toArray();
+        res.json(requests);
+    } catch (err) {
+        return sendServerError(
+            res,
+            "Failed to fetch host booking requests",
+            err,
+        );
+    }
+});
+
 // POST /add-studio - Create new creative studio listing (Protected)
 app.post("/add-studio", verifyToken, async (req, res) => {
     try {
         const data = req.body;
-        const userEmail = req.user?.email || data.ownerEmail;
+        if (!isValidStudioImages(data.images)) {
+            return res.status(400).json({
+                error: `Add between 1 and ${MAX_STUDIO_IMAGES} valid studio images.`,
+            });
+        }
+        const userEmail = req.user.email.toLowerCase();
         const userName = req.user?.name || data.ownerName;
 
         const newStudio = {
             ...data,
             ownerEmail: userEmail,
             ownerName: userName,
-            rating: 5.0,
-            reviewsCount: 1,
-            reviews: [
-                {
-                    id: "rev-init",
-                    author: "StudioNest Verification",
-                    rating: 5,
-                    date: new Date().toLocaleDateString("en-US", {
-                        month: "short",
-                        day: "numeric",
-                        year: "numeric",
-                    }),
-                    comment:
-                        "Workspace verified by StudioNest production quality review.",
-                },
-            ],
+            rating: 0,
+            reviewsCount: 0,
+            reviews: [],
             createdAt: new Date().toISOString(),
         };
 
@@ -352,6 +408,14 @@ app.patch("/studio/:id", verifyToken, async (req, res) => {
                 .filter((field) => Object.hasOwn(req.body, field))
                 .map((field) => [field, req.body[field]]),
         );
+        if (
+            Object.hasOwn(updateData, "images") &&
+            !isValidStudioImages(updateData.images)
+        ) {
+            return res.status(400).json({
+                error: `Add between 1 and ${MAX_STUDIO_IMAGES} valid studio images.`,
+            });
+        }
         if (!Object.keys(updateData).length) {
             return res.status(400).json({
                 error: "No editable studio fields were provided.",
@@ -370,10 +434,11 @@ app.patch("/studio/:id", verifyToken, async (req, res) => {
             return res.status(404).json({ error: "Studio not found" });
         }
 
-        // Verify ownership
         if (
-            req.user?.email &&
-            existing.ownerEmail &&
+            typeof req.user?.email !== "string" ||
+            !req.user.email.trim() ||
+            typeof existing.ownerEmail !== "string" ||
+            !existing.ownerEmail.trim() ||
             existing.ownerEmail.toLowerCase() !== req.user.email.toLowerCase()
         ) {
             return res.status(403).json({
@@ -419,10 +484,11 @@ app.delete("/studio/:id", verifyToken, async (req, res) => {
                 .json({ error: "Studio already removed or not found" });
         }
 
-        // Verify ownership
         if (
-            req.user?.email &&
-            existing.ownerEmail &&
+            typeof req.user?.email !== "string" ||
+            !req.user.email.trim() ||
+            typeof existing.ownerEmail !== "string" ||
+            !existing.ownerEmail.trim() ||
             existing.ownerEmail.toLowerCase() !== req.user.email.toLowerCase()
         ) {
             return res.status(403).json({
@@ -430,22 +496,39 @@ app.delete("/studio/:id", verifyToken, async (req, res) => {
             });
         }
 
-        const result = await studiosCollection.deleteOne(filter);
-        // Cascade cleanup: remove pending bookings for this studio
-        await bookingsCollection.updateMany(
-            { studioId: id, status: "Pending" },
-            {
-                $set: {
-                    status: "Cancelled",
-                    cancelledAt: new Date().toISOString(),
-                    cancellationReason: "Studio listing removed",
-                },
-            },
-        );
+        const deletionSession = client.startSession();
+        let deletedCount = 0;
+        try {
+            await deletionSession.withTransaction(async () => {
+                const result = await studiosCollection.deleteOne(filter, {
+                    session: deletionSession,
+                });
+                deletedCount = result.deletedCount;
+                if (deletedCount) {
+                    await bookingsCollection.updateMany(
+                        { studioId: id, status: "Pending" },
+                        {
+                            $set: {
+                                status: "Cancelled",
+                                cancelledAt: new Date().toISOString(),
+                                cancellationReason: "Studio listing removed",
+                            },
+                        },
+                        { session: deletionSession },
+                    );
+                }
+            });
+        } finally {
+            await deletionSession.endSession();
+        }
+
+        if (!deletedCount) {
+            return res.status(404).json({ error: "Studio not found" });
+        }
 
         res.json({
             message: `${existing.title} removed successfully!`,
-            deletedCount: result.deletedCount,
+            deletedCount,
         });
     } catch (err) {
         res.status(500).json({
@@ -471,7 +554,7 @@ app.post("/booking", verifyToken, async (req, res) => {
     try {
         const data = {
             ...req.body,
-            userEmail: req.user?.email || req.body.userEmail,
+            userEmail: req.user.email.toLowerCase(),
             userName: req.user?.name || req.body.userName,
         };
         const { studioId, date, startTime, endTime } = data;
@@ -493,14 +576,24 @@ app.post("/booking", verifyToken, async (req, res) => {
             });
         }
 
-        const requestedDate = new Date(`${date}T00:00:00`);
+        const [year, month, day] = date.split("-").map(Number);
+        const calendarDate = new Date(Date.UTC(year, month - 1, day));
+        const validCalendarDate =
+            calendarDate.getUTCFullYear() === year &&
+            calendarDate.getUTCMonth() === month - 1 &&
+            calendarDate.getUTCDate() === day;
         const today = new Date();
         today.setHours(0, 0, 0, 0);
+        const todayString = [
+            today.getFullYear(),
+            String(today.getMonth() + 1).padStart(2, "0"),
+            String(today.getDate()).padStart(2, "0"),
+        ].join("-");
         const reqStart = new Date(`${date}T${startTime}:00`).getTime();
         const reqEnd = new Date(`${date}T${endTime}:00`).getTime();
         if (
-            Number.isNaN(requestedDate.getTime()) ||
-            requestedDate < today ||
+            !validCalendarDate ||
+            date < todayString ||
             !Number.isFinite(reqStart) ||
             !Number.isFinite(reqEnd) ||
             reqEnd <= reqStart ||
@@ -518,64 +611,128 @@ app.post("/booking", verifyToken, async (req, res) => {
         if (!studio) {
             return res.status(404).json({ error: "Studio not found" });
         }
-        if (
-            !Number.isInteger(data.guests) ||
-            data.guests < 1 ||
-            data.guests > studio.capacity
-        ) {
+        if (!Number.isInteger(data.guests) || data.guests < 1) {
             return res.status(400).json({
-                error: `Guest count must be between 1 and ${studio.capacity}.`,
+                error: "Guest count must be at least one.",
             });
         }
 
-        // 1. Collision detection: Prevent double booking
-        const overlappingBookings = await bookingsCollection
-            .find({
-                studioId: studioId,
-                date: date,
-                status: { $in: ["Confirmed", "Pending"] },
-            })
-            .toArray();
+        const bookingSession = client.startSession();
+        let bookingResult = null;
+        let collisionMessage = null;
+        let guestCapacity = null;
+        let studioMissing = false;
+        try {
+            await bookingSession.withTransaction(async () => {
+                bookingResult = null;
+                collisionMessage = null;
+                guestCapacity = null;
+                studioMissing = false;
 
-        const collision = overlappingBookings.find((b) => {
-            const bStart = new Date(`${b.date}T${b.startTime}:00`).getTime();
-            const bEnd = new Date(`${b.date}T${b.endTime}:00`).getTime();
-            return reqStart < bEnd && reqEnd > bStart;
-        });
+                // This write serializes transactions for the same studio.
+                const lockResult = await studiosCollection.updateOne(
+                    studioFilter,
+                    { $inc: { _bookingLockVersion: 1 } },
+                    { session: bookingSession },
+                );
+                if (!lockResult.matchedCount) {
+                    studioMissing = true;
+                    return;
+                }
 
-        if (collision) {
+                const currentStudio = await studiosCollection.findOne(
+                    studioFilter,
+                    { session: bookingSession },
+                );
+                if (!currentStudio) {
+                    studioMissing = true;
+                    return;
+                }
+                if (data.guests > currentStudio.capacity) {
+                    guestCapacity = currentStudio.capacity;
+                    return;
+                }
+
+                const overlappingBookings = await bookingsCollection
+                    .find(
+                        {
+                            studioId,
+                            date,
+                            status: { $in: ["Confirmed", "Pending"] },
+                        },
+                        { session: bookingSession },
+                    )
+                    .toArray();
+
+                const collision = overlappingBookings.find((booking) => {
+                    const bookingStart = new Date(
+                        `${booking.date}T${booking.startTime}:00`,
+                    ).getTime();
+                    const bookingEnd = new Date(
+                        `${booking.date}T${booking.endTime}:00`,
+                    ).getTime();
+                    return reqStart < bookingEnd && reqEnd > bookingStart;
+                });
+
+                if (collision) {
+                    collisionMessage = `This workspace is already reserved from ${collision.startTime} to ${collision.endTime} on ${date}. Please choose another time slot.`;
+                    return;
+                }
+
+                const hours = calculateHours(startTime, endTime);
+                const rate = currentStudio.rate;
+                const deposit = currentStudio.deposit;
+                const subtotal = hours * rate;
+                const serviceFee = Math.round(subtotal * 0.08);
+                const total = subtotal + serviceFee + deposit;
+                const newBooking = {
+                    ...data,
+                    hours,
+                    rate,
+                    subtotal,
+                    serviceFee,
+                    deposit,
+                    total,
+                    status: "Pending",
+                    createdAt: new Date().toISOString(),
+                };
+                const result = await bookingsCollection.insertOne(newBooking, {
+                    session: bookingSession,
+                });
+                bookingResult = {
+                    insertedId: result.insertedId,
+                    booking: newBooking,
+                };
+            });
+        } finally {
+            await bookingSession.endSession();
+        }
+
+        if (studioMissing) {
+            return res.status(404).json({ error: "Studio not found" });
+        }
+        if (guestCapacity !== null) {
+            return res.status(400).json({
+                error: `Guest count must be between 1 and ${guestCapacity}.`,
+            });
+        }
+        if (collisionMessage) {
             return res.status(409).json({
                 error: "Double booking collision detected",
-                message: `This workspace is already reserved from ${collision.startTime} to ${collision.endTime} on ${date}. Please choose another time slot.`,
+                message: collisionMessage,
             });
         }
-
-        // 2. Fetch studio to compute exact financial breakdown
-        const rate = studio.rate;
-        const deposit = studio.deposit;
-        const hours = calculateHours(startTime, endTime);
-        const subtotal = hours * rate;
-        const serviceFee = Math.round(subtotal * 0.08); // 8% platform fee
-        const total = subtotal + serviceFee + deposit;
-
-        const newBooking = {
-            ...data,
-            hours,
-            rate,
-            subtotal,
-            serviceFee,
-            deposit,
-            total,
-            status: "Pending",
-            createdAt: new Date().toISOString(),
-        };
-
-        const result = await bookingsCollection.insertOne(newBooking);
+        if (!bookingResult) {
+            throw new Error("Booking transaction completed without a result.");
+        }
 
         res.status(201).json({
             message: "Studio reserved successfully! Confirmation generated.",
-            insertedId: result.insertedId,
-            booking: { ...newBooking, _id: result.insertedId },
+            insertedId: bookingResult.insertedId,
+            booking: {
+                ...bookingResult.booking,
+                _id: bookingResult.insertedId,
+            },
         });
     } catch (err) {
         res.status(500).json({
@@ -644,12 +801,20 @@ app.patch("/booking/:id/cancel", verifyToken, async (req, res) => {
             });
         }
 
-        const result = await bookingsCollection.updateOne(filter, {
-            $set: {
-                status: "Cancelled",
-                cancelledAt: new Date().toISOString(),
+        const result = await bookingsCollection.updateOne(
+            { ...filter, status: "Pending" },
+            {
+                $set: {
+                    status: "Cancelled",
+                    cancelledAt: new Date().toISOString(),
+                },
             },
-        });
+        );
+        if (result.modifiedCount === 0) {
+            return res.status(409).json({
+                error: "This reservation is no longer pending and cannot be cancelled.",
+            });
+        }
 
         res.json({
             message: "Reservation successfully cancelled.",
@@ -663,6 +828,161 @@ app.patch("/booking/:id/cancel", verifyToken, async (req, res) => {
                     ? "Internal server error"
                     : err.message,
         });
+    }
+});
+
+// PATCH /booking/:id/host-decision - Confirm or decline a pending request
+app.patch("/booking/:id/host-decision", verifyToken, async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { decision } = req.body;
+        if (!["confirm", "decline"].includes(decision)) {
+            return res.status(400).json({
+                error: "Decision must be either confirm or decline.",
+            });
+        }
+
+        const bookingFilter = ObjectId.isValid(id)
+            ? { _id: new ObjectId(id) }
+            : { id };
+        const decisionSession = client.startSession();
+        let resultState = "not-found";
+        let conflict = null;
+        try {
+            await decisionSession.withTransaction(async () => {
+                resultState = "not-found";
+                conflict = null;
+                const booking = await bookingsCollection.findOne(
+                    bookingFilter,
+                    { session: decisionSession },
+                );
+                if (!booking) return;
+
+                const studioFilter = ObjectId.isValid(booking.studioId)
+                    ? { _id: new ObjectId(booking.studioId) }
+                    : { id: booking.studioId };
+                const studio = await studiosCollection.findOne(studioFilter, {
+                    session: decisionSession,
+                });
+                if (
+                    !studio ||
+                    typeof studio.ownerEmail !== "string" ||
+                    studio.ownerEmail.toLowerCase() !==
+                        req.user.email.toLowerCase()
+                ) {
+                    resultState = "forbidden";
+                    return;
+                }
+                if (booking.status !== "Pending") {
+                    resultState = "not-pending";
+                    return;
+                }
+
+                if (decision === "confirm") {
+                    const lockResult = await studiosCollection.updateOne(
+                        studioFilter,
+                        { $inc: { _bookingLockVersion: 1 } },
+                        { session: decisionSession },
+                    );
+                    if (!lockResult.matchedCount) {
+                        resultState = "studio-missing";
+                        return;
+                    }
+
+                    const pendingRequests = await bookingsCollection
+                        .find(
+                            {
+                                studioId: booking.studioId,
+                                date: booking.date,
+                                status: { $in: ["Confirmed", "Pending"] },
+                                _id: { $ne: booking._id },
+                            },
+                            { session: decisionSession },
+                        )
+                        .toArray();
+                    const collision = pendingRequests.find((other) => {
+                        const otherStart = new Date(
+                            `${other.date}T${other.startTime}:00`,
+                        ).getTime();
+                        const otherEnd = new Date(
+                            `${other.date}T${other.endTime}:00`,
+                        ).getTime();
+                        const requestedStart = new Date(
+                            `${booking.date}T${booking.startTime}:00`,
+                        ).getTime();
+                        const requestedEnd = new Date(
+                            `${booking.date}T${booking.endTime}:00`,
+                        ).getTime();
+                        return (
+                            requestedStart < otherEnd &&
+                            requestedEnd > otherStart
+                        );
+                    });
+                    if (collision) {
+                        conflict = `This request overlaps another ${collision.status.toLowerCase()} booking from ${collision.startTime} to ${collision.endTime}.`;
+                        resultState = "conflict";
+                        return;
+                    }
+                }
+
+                const isConfirming = decision === "confirm";
+                const update = await bookingsCollection.updateOne(
+                    { ...bookingFilter, status: "Pending" },
+                    {
+                        $set: isConfirming
+                            ? {
+                                  status: "Confirmed",
+                                  confirmedAt: new Date().toISOString(),
+                              }
+                            : {
+                                  status: "Declined",
+                                  declinedAt: new Date().toISOString(),
+                              },
+                    },
+                    { session: decisionSession },
+                );
+                resultState =
+                    update.modifiedCount === 1 ? "updated" : "not-pending";
+            });
+        } finally {
+            await decisionSession.endSession();
+        }
+
+        if (resultState === "not-found") {
+            return res
+                .status(404)
+                .json({ error: "Booking request not found." });
+        }
+        if (resultState === "forbidden") {
+            return res.status(403).json({
+                error: "You can only manage requests for your own studios.",
+            });
+        }
+        if (resultState === "studio-missing") {
+            return res.status(404).json({ error: "Studio not found." });
+        }
+        if (resultState === "not-pending") {
+            return res.status(409).json({
+                error: "This booking request is no longer pending.",
+            });
+        }
+        if (resultState === "conflict") {
+            return res.status(409).json({
+                error:
+                    conflict ||
+                    "This booking request conflicts with another booking.",
+            });
+        }
+
+        return res.json({
+            message:
+                decision === "confirm"
+                    ? "Booking request confirmed."
+                    : "Booking request declined.",
+            status: decision === "confirm" ? "Confirmed" : "Declined",
+        });
+    } catch (err) {
+        return sendServerError(res, "Failed to update booking request", err);
     }
 });
 
@@ -737,9 +1057,17 @@ app.get("/wishlist/:email", verifyToken, async (req, res) => {
 // POST /wishlist - Toggle studio saved state
 app.post("/wishlist", verifyToken, async (req, res) => {
     try {
-        const { email, studioId } = req.body;
-        if (!email || !studioId) {
-            return res.status(400).json({ error: "Missing email or studioId" });
+        const { email, studioId, saved } = req.body;
+        if (
+            typeof email !== "string" ||
+            !email.trim() ||
+            typeof studioId !== "string" ||
+            !studioId.trim() ||
+            typeof saved !== "boolean"
+        ) {
+            return res.status(400).json({
+                error: "Email, studioId, and a boolean saved value are required.",
+            });
         }
         if (
             !req.user?.email ||
@@ -751,27 +1079,34 @@ app.post("/wishlist", verifyToken, async (req, res) => {
         }
 
         const normEmail = email.toLowerCase();
-        const entry = await wishlistCollection.findOne({ email: normEmail });
-        let studioIds = entry?.studioIds || [];
-
-        const exists = studioIds.includes(studioId);
-        if (exists) {
-            studioIds = studioIds.filter((id) => id !== studioId);
+        if (saved) {
+            await wishlistCollection.updateOne(
+                { email: normEmail },
+                {
+                    $addToSet: { studioIds: studioId },
+                    $set: { updatedAt: new Date().toISOString() },
+                },
+                { upsert: true },
+            );
         } else {
-            studioIds.push(studioId);
+            await wishlistCollection.updateOne(
+                { email: normEmail },
+                {
+                    $pull: { studioIds: studioId },
+                    $set: { updatedAt: new Date().toISOString() },
+                },
+            );
         }
 
-        await wishlistCollection.updateOne(
-            { email: normEmail },
-            { $set: { studioIds, updatedAt: new Date().toISOString() } },
-            { upsert: true },
-        );
+        const entry = await wishlistCollection.findOne({ email: normEmail });
+        const studioIds = entry?.studioIds || [];
+        const isSaved = studioIds.includes(studioId);
 
         res.json({
-            message: exists
-                ? "Removed from saved studios."
-                : "Saved to creative wishlist.",
-            saved: !exists,
+            message: isSaved
+                ? "Saved to creative wishlist."
+                : "Removed from saved studios.",
+            saved: isSaved,
             wishlist: studioIds,
         });
     } catch (err) {
